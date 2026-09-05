@@ -1,0 +1,185 @@
+"""Kite authentication for one trusted user on a loopback-only local server.
+
+The SDK response is never returned directly. API responses use explicit public
+models; the API secret and request token are used once and are never persisted.
+"""
+
+import hashlib
+import secrets
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable
+
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from kiteconnect import KiteConnect
+from kiteconnect.exceptions import InputException, KiteException, PermissionException, TokenException
+from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
+from requests.exceptions import RequestException
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+from .store import SavedSession, SessionStore
+
+COOKIE_NAME = "kite_local_session"
+ALLOWED_ORIGINS = {
+    f"http://{host}:{port}"
+    for host in ("127.0.0.1", "localhost")
+    for port in (5173, 4173, 8000)
+}
+DEFAULT_STORE = Path(__file__).resolve().parents[1] / ".data" / "session.json"
+
+
+class LoginBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    api_key: SecretStr
+    api_secret: SecretStr
+    request_token: SecretStr
+
+    @field_validator("api_key", "api_secret", "request_token")
+    @classmethod
+    def valid_credential(cls, value: SecretStr) -> SecretStr:
+        cleaned = value.get_secret_value().strip()
+        if not cleaned or len(cleaned) > 512 or any(character.isspace() for character in cleaned):
+            raise ValueError("Enter a valid credential without whitespace.")
+        return SecretStr(cleaned)
+
+
+class SessionStatus(BaseModel):
+    authenticated: bool
+    saved_at: str | None = None
+
+
+class UserProfile(BaseModel):
+    user_name: str
+    user_id: str
+    products: list[str]
+    exchanges: list[str]
+
+
+def create_app(store_path: Path = DEFAULT_STORE, kite_factory: Callable = KiteConnect) -> FastAPI:
+    app = FastAPI(title="Kite Workspace API", version="1.0.0", docs_url=None, redoc_url=None, openapi_url=None)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
+    store = SessionStore(store_path)
+    # Serialize login, profile validation, and logout for the one local account.
+    # Run one Uvicorn worker; the SDK runs in FastAPI's worker thread pool.
+    lock = threading.RLock()
+
+    @app.middleware("http")
+    async def local_boundary(request: Request, call_next):
+        origin = request.headers.get("origin")
+        if origin and origin not in ALLOWED_ORIGINS:
+            response = JSONResponse({"detail": "This local API only accepts requests from the workspace."}, status_code=403)
+        elif request.method not in {"GET", "HEAD", "OPTIONS"} and request.headers.get("x-kite-client") != "local-web":
+            response = JSONResponse({"detail": "The workspace request header is required."}, status_code=403)
+        else:
+            try:
+                response = await call_next(request)
+            except Exception:
+                # Never reflect SDK exception text, validation inputs, or secrets.
+                response = JSONResponse({"detail": "The backend could not complete the request. Please try again."}, status_code=500)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_request: Request, _error: RequestValidationError):
+        # FastAPI's default 422 can include submitted input. Omit it entirely.
+        return JSONResponse({"detail": "Enter a valid API key, API secret, and request token."}, status_code=422)
+
+    def authorized_session(request: Request) -> SavedSession:
+        saved = store.read()
+        if not saved or not saved.matches(request.cookies.get(COOKIE_NAME)):
+            raise HTTPException(status_code=401, detail="Connect your Kite account to continue.")
+        return saved
+
+    def client_for(saved: SavedSession):
+        kite = kite_factory(api_key=saved.api_key, timeout=10, debug=False)
+        kite.set_access_token(saved.access_token)
+        return kite
+
+    def public_profile(saved: SavedSession) -> UserProfile:
+        try:
+            data = client_for(saved).profile()
+            # Explicit allowlist prevents credentials in SDK data from leaking.
+            return UserProfile(user_name=data["user_name"], user_id=data["user_id"],
+                               products=data.get("products", []), exchanges=data.get("exchanges", []))
+        except TokenException:
+            store.clear()
+            raise HTTPException(status_code=401, detail="Your Kite session has expired or was revoked. Connect again with a fresh request token.") from None
+        except (KiteException, RequestException):
+            # A temporary outage must not discard a reusable token.
+            raise HTTPException(status_code=503, detail="Kite is temporarily unavailable. Your saved session is unchanged; please try again.") from None
+
+    @app.get("/api/health")
+    def health():
+        return {"status": "ok"}
+
+    @app.post("/api/login", response_model=SessionStatus)
+    def login(body: LoginBody, response: Response):
+        with lock:
+            try:
+                kite = kite_factory(api_key=body.api_key.get_secret_value(), timeout=10, debug=False)
+                data = kite.generate_session(body.request_token.get_secret_value(), api_secret=body.api_secret.get_secret_value())
+            except (TokenException, InputException, PermissionException):
+                raise HTTPException(status_code=401, detail="Kite could not verify your credentials. Check your API key and secret, then get a fresh request token.") from None
+            except (KiteException, RequestException):
+                raise HTTPException(status_code=503, detail="Could not connect to Kite. Please try again with a fresh request token.") from None
+            access_token = data.get("access_token")
+            if not isinstance(access_token, str) or not access_token:
+                raise HTTPException(status_code=502, detail="Kite did not create a session. Get a fresh request token and try again.")
+            browser_session = secrets.token_urlsafe(32)
+            saved = SavedSession(api_key=body.api_key.get_secret_value(), access_token=access_token,
+                                 browser_session_hash=hashlib.sha256(browser_session.encode()).hexdigest(),
+                                 saved_at=datetime.now(timezone.utc).isoformat())
+            try:
+                store.save(saved)
+            except OSError:
+                raise HTTPException(status_code=500, detail="The backend could not save the session. Check write access to backend/.data, then get a fresh request token.") from None
+            response.set_cookie(COOKIE_NAME, browser_session, httponly=True, samesite="strict",
+                                secure=False, max_age=7 * 24 * 60 * 60, path="/api")
+            return SessionStatus(authenticated=True, saved_at=saved.saved_at)
+
+    @app.get("/api/session", response_model=SessionStatus)
+    def session(request: Request, response: Response):
+        with lock:
+            saved = store.read()
+            if not saved or not saved.matches(request.cookies.get(COOKIE_NAME)):
+                response.delete_cookie(COOKIE_NAME, path="/api")
+                return SessionStatus(authenticated=False)
+            try:
+                public_profile(saved)
+            except HTTPException as error:
+                if error.status_code != 401:
+                    raise
+                response.delete_cookie(COOKIE_NAME, path="/api")
+                return SessionStatus(authenticated=False)
+            return SessionStatus(authenticated=True, saved_at=saved.saved_at)
+
+    @app.get("/api/profile", response_model=UserProfile)
+    def profile(request: Request):
+        with lock:
+            return public_profile(authorized_session(request))
+
+    @app.post("/api/logout", response_model=SessionStatus)
+    def logout(request: Request, response: Response):
+        with lock:
+            saved = store.read()
+            if saved:
+                saved = authorized_session(request)
+                try:
+                    client_for(saved).invalidate_access_token()
+                except TokenException:
+                    pass  # An already-expired token is safe to forget.
+                except (KiteException, RequestException):
+                    raise HTTPException(status_code=503, detail="Kite could not end the session. Please try disconnecting again.") from None
+                store.clear()
+            response.delete_cookie(COOKIE_NAME, path="/api")
+            return SessionStatus(authenticated=False)
+
+    return app
+
+
+app = create_app()
