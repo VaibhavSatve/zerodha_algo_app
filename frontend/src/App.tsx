@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent, ReactNode } from 'react'
 import {
-  ArrowDown, ArrowRight, ArrowUpRight, Check, CheckCheck, ChevronDown, ChevronRight,
+  Activity, ArrowDown, ArrowRight, ArrowUpRight, Check, CheckCheck, ChevronDown, ChevronRight,
   CircleHelp, Clock3, Code2, ExternalLink, Eye, EyeOff, Fingerprint, KeyRound,
   LayoutDashboard, LoaderCircle, LockKeyhole, LogOut, Origami, PlugZap,
   RefreshCw, Server, ShieldCheck, Terminal, UserRound, X,
 } from 'lucide-react'
 import { api, ApiError } from './api'
 import type { Credentials, Profile, Session } from './api'
+import SignalsTab from './SignalsTab'
 
 const docs = 'https://kite.trade/docs/connect/v3/user/'
 const blankCredentials: Credentials = { api_key: '', api_secret: '', request_token: '' }
@@ -101,7 +102,7 @@ export default function App() {
   const [working, setWorking] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
-  const [tab, setTab] = useState<'user' | 'session'>('user')
+  const [tab, setTab] = useState<'user' | 'signals' | 'session'>('user')
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const refreshInFlight = useRef(false)
   const changeRoute = useCallback((authenticated: boolean) => {
@@ -162,7 +163,8 @@ export default function App() {
   function tabKey(event: KeyboardEvent<HTMLButtonElement>) {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
     event.preventDefault()
-    const next = event.key === 'Home' ? 'user' : event.key === 'End' ? 'session' : tab === 'user' ? 'session' : 'user'
+    const tabs = ['user', 'signals', 'session'] as const
+    const next = event.key === 'Home' ? 'user' : event.key === 'End' ? 'session' : tabs[(tabs.indexOf(tab) + (event.key === 'ArrowRight' ? 1 : 2)) % tabs.length]
     setTab(next); document.getElementById(`tab-${next}`)?.focus()
     if (next === 'user') void refreshProfile()
   }
@@ -179,9 +181,11 @@ export default function App() {
       <main>
         {error && <Notice onClose={() => setError('')}>{error}{restoreFailed && <button className="retry-button" onClick={retrySession} disabled={checking || working}><RefreshCw size={14} /> Retry saved session</button>}</Notice>}
         {checking ? <div className="loading-view" role="status"><LoaderCircle size={26} className="spin" /><h2>Checking your saved session</h2><p>Getting your workspace ready…</p></div> : !session.authenticated ? <Login onLogin={login} working={working} /> : <>
-          <div className="page-heading"><div><div className="eyebrow">YOUR WORKSPACE</div><h1>Account overview</h1><p>Your Kite profile and connection, in one place.</p></div><button className="secondary-button" onClick={refreshProfile} disabled={refreshing || working}><RefreshCw size={16} className={refreshing ? 'spin' : ''} />{refreshing ? 'Refreshing…' : 'Refresh profile'}</button></div>
-          <div className="tabs-row"><div className="tabs" role="tablist" aria-label="Account dashboard"><button id="tab-user" role="tab" aria-selected={tab === 'user'} aria-controls="panel-user" tabIndex={tab === 'user' ? 0 : -1} onKeyDown={tabKey} onClick={() => { setTab('user'); void refreshProfile() }}><UserRound size={17} /> User</button><button id="tab-session" role="tab" aria-selected={tab === 'session'} aria-controls="panel-session" tabIndex={tab === 'session' ? 0 : -1} onKeyDown={tabKey} onClick={() => setTab('session')}><ShieldCheck size={17} /> Session</button></div><span className="updated" aria-live="polite">{lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Waiting for profile'}</span></div>
-          <div id={`panel-${tab}`} role="tabpanel" aria-labelledby={`tab-${tab}`} tabIndex={0}>{tab === 'user' ? <UserTab profile={profile} refreshing={refreshing} onRefresh={refreshProfile} /> : <SessionTab session={session} />}</div>
+          <div className="page-heading"><div><div className="eyebrow">YOUR WORKSPACE</div><h1>{tab === 'signals' ? 'Market signals' : 'Account overview'}</h1><p>{tab === 'signals' ? 'Explore Nifty 100 momentum, one crossover at a time.' : 'Your Kite profile and connection, in one place.'}</p></div>{tab === 'signals' ? <span className="heading-mark"><Activity size={18} /> NIFTY 100</span> : <button className="secondary-button" onClick={refreshProfile} disabled={refreshing || working}><RefreshCw size={16} className={refreshing ? 'spin' : ''} />{refreshing ? 'Refreshing…' : 'Refresh profile'}</button>}</div>
+          <div className="tabs-row"><div className="tabs" role="tablist" aria-label="Account dashboard"><button id="tab-user" role="tab" aria-selected={tab === 'user'} aria-controls="panel-user" tabIndex={tab === 'user' ? 0 : -1} onKeyDown={tabKey} onClick={() => { setTab('user'); void refreshProfile() }}><UserRound size={17} /> User</button><button id="tab-signals" role="tab" aria-selected={tab === 'signals'} aria-controls="panel-signals" tabIndex={tab === 'signals' ? 0 : -1} onKeyDown={tabKey} onClick={() => setTab('signals')}><Activity size={17} /> Signals</button><button id="tab-session" role="tab" aria-selected={tab === 'session'} aria-controls="panel-session" tabIndex={tab === 'session' ? 0 : -1} onKeyDown={tabKey} onClick={() => setTab('session')}><ShieldCheck size={17} /> Session</button></div><span className="updated" aria-live="polite">{tab === 'signals' ? 'Completed candles · IST' : lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Waiting for profile'}</span></div>
+          <div id="panel-user" role="tabpanel" aria-labelledby="tab-user" tabIndex={0} hidden={tab !== 'user'}><UserTab profile={profile} refreshing={refreshing} onRefresh={refreshProfile} /></div>
+          <div id="panel-signals" role="tabpanel" aria-labelledby="tab-signals" tabIndex={0} hidden={tab !== 'signals'}><SignalsTab onExpired={message => { setSession({ authenticated: false, saved_at: null }); setProfile(null); setLastUpdated(null); setError(message); changeRoute(false) }} /></div>
+          <div id="panel-session" role="tabpanel" aria-labelledby="tab-session" tabIndex={0} hidden={tab !== 'session'}><SessionTab session={session} /></div>
         </>}
         <footer className="page-footer"><span><Origami size={15} /> Built for your Kite connection.</span><span><LockKeyhole size={12} /> Local workspace <i /> Backend-only token storage</span></footer>
       </main>

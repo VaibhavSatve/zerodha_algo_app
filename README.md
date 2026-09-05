@@ -1,6 +1,6 @@
 # Kite Workspace
 
-A React + Vite frontend and Python FastAPI backend for a single user's local Zerodha Kite Connect workspace. The dark dashboard has **User** and **Session** tabs. The User tab fetches the name, user ID, products, and exchanges from Kite through FastAPI.
+A React + Vite frontend and Python FastAPI backend for a single user's local Zerodha Kite Connect workspace. The dark dashboard has **User**, **Signals**, and **Session** tabs. The User tab shows your profile; Signals scans Nifty 100 equities for intraday EMA crossovers using your saved Kite session.
 
 Source repository: [VaibhavSatve/zerodha_algo_app](https://github.com/VaibhavSatve/zerodha_algo_app).
 
@@ -12,6 +12,70 @@ cd zerodha_algo_app
 ```
 
 The repository root is the `kite-workspace` directory referred to below.
+
+## Dashboard Signals tab
+
+### Install or update, then run (Windows PowerShell)
+
+From your local checkout, install the backend packages (including pandas) once:
+
+```powershell
+cd "D:\Personal\Trading\Algo Trading App"
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r backend/requirements-lock.txt
+pnpm --dir frontend install --frozen-lockfile
+```
+
+Skip the `venv` command when `.venv` already exists. For a fresh clone in another location, use that checkout's path. Install Python 3.11+ and Node.js 22.12+ (or 24 LTS); install pnpm with `npm install -g pnpm@11` if needed.
+
+**Terminal 1 — backend:**
+
+```powershell
+cd "D:\Personal\Trading\Algo Trading App"
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 --reload --reload-dir backend/app --no-access-log
+```
+
+**Terminal 2 — frontend:**
+
+```powershell
+cd "D:\Personal\Trading\Algo Trading App"
+pnpm --dir frontend dev
+```
+
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173), connect with the existing login form if needed, and select **Signals**. A valid saved dashboard session is reused automatically. Stop an older server using the same port before starting these commands.
+
+### Generate and read signals
+
+1. Choose **Short EMA** (default 6), **Long EMA** (21), **Timeframe** (5 Minute), **Lookback Days** (30), and **Max Stocks** (100).
+2. Click **Generate Signals**. Inputs and the button are disabled while scanning. You can switch dashboard tabs and return without losing the scan. Keep the page open; a full scan takes several minutes, especially for 4 Hour or longer lookbacks.
+3. Read the newest crossover first. Green ↑ means Bullish; red ↓ means Bearish. Search by ticker/company and filter All/Bullish/Bearish. Filtering preserves the original ranks from the full scan.
+4. Changing parameters clears the old results to avoid relabeling old values. EMA column headings follow your chosen periods. Generate again to calculate the new values.
+
+Whole-number limits: `1 <= Short EMA < Long EMA <= 100`, Lookback Days **1–90**, Max Stocks **1–100**. Max Stocks selects the first N official constituents in ticker order; it does not truncate the newest N signals after scanning. Missing mappings are skipped. Stocks Scanned counts mapped stocks attempted; the table footer counts stocks with sufficient valid data. The summary includes signals, bullish/bearish totals, selected timeframe, and last generation time.
+
+### Candle and crossover rules
+
+- The backend downloads the current [official Nifty 100 CSV](https://www.niftyindices.com/IndexConstituent/ind_nifty100list.csv), matches exact symbols to Kite's NSE cash `EQ` instruments, and fetches historical candles with the saved backend token.
+- Native intervals are `5minute`, `15minute`, and `60minute`. **4 Hour** reuses `60minute` data and pandas OHLCV resampling, anchored at 09:15 IST per trading day. It produces 09:15–13:15 and the shorter 13:15–15:30 closing session bar, never joining overnight data. All expected hourly source candles must be present. See the [Kite historical API](https://kite.trade/docs/connect/v3/historical/) for supported native intervals.
+- One scan-start timestamp determines completion for every stock. A 14:55 five-minute candle is eligible at 15:00. The last hourly candle starts at 15:15 and ends at 15:30. Normal NSE cash hours are modeled; special sessions outside 09:15–15:30 are excluded.
+- Lookback Days is a rolling calendar-day window ending at scan start. Extra history is fetched **before** that window to initialize EMAs (approximately five long-EMA periods plus a calendar buffer). That older history is used only for calculation; its crossovers cannot appear in results. Requests are chunked into at most 60 days.
+- EMA uses pandas `ewm(span=period, adjust=False).mean()`. A bullish crossover requires previous short EMA ≤ long EMA and current short EMA > long EMA; bearish reverses those inequalities. Both candles must be completed and adjacent. Missing intraday candles are not bridged. The previous session's final candle and next session's opening candle can be consecutive.
+- Each stock returns its latest actual crossover within the window. Merely being above/below the long EMA does not create a signal. Full timestamps are sorted descending, with ticker ordering for ties. Prices/EMAs are rounded only for output, so very small genuine crosses can display equal rounded EMA values.
+- **Crossover Date / Time label the crossover candle's start in IST.** Close and EMA values belong to that candle. They are not current quotes. EMA values may differ from a chart initialized with a different history.
+
+### Sessions, failures, and API
+
+All Kite calls, EMA calculations, resampling, and ranking run in FastAPI. The Signals browser request contains only scanner parameters plus the existing opaque HttpOnly session cookie. No API key, API secret, request token, or access token is returned by the scanner API or stored in its frontend state.
+
+`GET /api/signals/ema?short_ema=6&long_ema=21&timeframe=5minute&lookback_days=30&max_stocks=100`
+
+The request requires the existing session cookie and `X-Kite-Client: local-web`. The response includes the applied parameters, scan cutoff, lookback start, generation time, summary counts, per-stock warnings, and ranked public signal fields. `401` asks you to reconnect, `409` means another scan is running, `422` means invalid parameters, and `503` means the official list or Kite is temporarily unavailable. Run one Uvicorn worker: a backend lock prevents overlapping scans across browser tabs. Reloading the page does not cancel an in-progress server scan; wait for it to finish before trying again.
+
+Historical calls wait 0.55 seconds between requests. Rate-limit (429), network, and server failures retry at most twice with 2- and 4-second backoffs, within [Kite's historical API rate limit](https://kite.trade/docs/connect/v3/exceptions/). An individual stock failure adds a warning and other stocks continue. Empty data, insufficient history, and missing mappings are shown in expandable details. No crossovers is a valid empty result. If no stocks could be analyzed, check that your Kite app has historical-data access.
+
+Expired/revoked sessions stop the scan and return you to login; temporary outages preserve the saved session. Disconnecting or replacing the login during a scan stops further requests for that old session. Browser requests allow up to 20 minutes for a large scan; a network interruption can leave the backend finishing the current scan, and duplicate requests remain blocked until it exits. Scans are read-only and place no orders.
+
+Backend checks: from the project root, `cd backend` and run `..\.venv\Scripts\python.exe -m pytest -q`. Frontend check from the project root: `pnpm --dir frontend build`. Tests use synthetic candles and mocked Kite responses, with no live credentials.
 
 ## Standalone Nifty 100 EMA scanner
 
@@ -209,9 +273,10 @@ Tests use a mocked Kite SDK and temporary stores. They verify session reuse afte
 | `POST /api/login` | Exchange app credentials and request token | `authenticated`, `saved_at` |
 | `GET /api/session` | Validate and restore a saved session | `authenticated`, `saved_at` |
 | `GET /api/profile` | Retrieve profile with the backend token | `user_name`, `user_id`, `products`, `exchanges` |
+| `GET /api/signals/ema` | Scan Nifty 100 intraday EMA crossovers | Applied parameters, counts, warnings, ranked signals |
 | `POST /api/logout` | Revoke and remove the current session | `authenticated`, `saved_at` |
 
-POST requests require `X-Kite-Client: local-web`. Profile/logout require the opaque session cookie. Session responses never include a Kite access token. Interactive API docs are disabled to avoid encouraging credentials to be retained in a separate browser surface.
+POST requests and the Signals GET request require `X-Kite-Client: local-web`. Profile, signals, and logout require the opaque session cookie. Session responses never include a Kite access token. Interactive API docs are disabled to avoid encouraging credentials to be retained in a separate browser surface.
 
 ## Troubleshooting
 

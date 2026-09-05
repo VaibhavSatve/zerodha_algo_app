@@ -9,9 +9,9 @@ import secrets
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Annotated, Callable
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from kiteconnect import KiteConnect
@@ -21,6 +21,7 @@ from requests.exceptions import RequestException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .store import SavedSession, SessionStore
+from .signals import ScanDataError, ScanParameters, ScanResult, ScanSessionChanged, scan
 
 COOKIE_NAME = "kite_local_session"
 ALLOWED_ORIGINS = {
@@ -65,6 +66,7 @@ def create_app(store_path: Path = DEFAULT_STORE, kite_factory: Callable = KiteCo
     # Serialize login, profile validation, and logout for the one local account.
     # Run one Uvicorn worker; the SDK runs in FastAPI's worker thread pool.
     lock = threading.RLock()
+    scan_lock = threading.Lock()  # One scan across all browser tabs (one worker).
 
     @app.middleware("http")
     async def local_boundary(request: Request, call_next):
@@ -87,6 +89,8 @@ def create_app(store_path: Path = DEFAULT_STORE, kite_factory: Callable = KiteCo
     @app.exception_handler(RequestValidationError)
     async def validation_error(_request: Request, _error: RequestValidationError):
         # FastAPI's default 422 can include submitted input. Omit it entirely.
+        if _request.url.path == "/api/signals/ema":
+            return JSONResponse({"detail": "Use whole numbers: 1 <= Short EMA < Long EMA <= 100, Lookback Days 1–90, Max Stocks 1–100, and a supported timeframe."}, status_code=422)
         return JSONResponse({"detail": "Enter a valid API key, API secret, and request token."}, status_code=422)
 
     def authorized_session(request: Request) -> SavedSession:
@@ -162,6 +166,38 @@ def create_app(store_path: Path = DEFAULT_STORE, kite_factory: Callable = KiteCo
     def profile(request: Request):
         with lock:
             return public_profile(authorized_session(request))
+
+    @app.get("/api/signals/ema", response_model=ScanResult)
+    def ema_signals(request: Request, parameters: Annotated[ScanParameters, Query()]):
+        if request.headers.get("x-kite-client") != "local-web":
+            raise HTTPException(status_code=403, detail="Start a scan from the workspace Signals tab.")
+        with lock:
+            saved = authorized_session(request)
+        if not scan_lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="A scan is already running. Wait for it to finish before generating another.")
+
+        def check_scan_session():
+            with lock:
+                if store.read() != saved:
+                    raise ScanSessionChanged
+
+        try:
+            with lock:
+                check_scan_session()
+                public_profile(saved)
+            return scan(client_for(saved), parameters, check_scan_session)
+        except TokenException:
+            with lock:
+                # An old scan must never delete a newer login's saved token.
+                if store.read() == saved:
+                    store.clear()
+            raise HTTPException(status_code=401, detail="Your Kite session expired. Connect again, then generate signals.") from None
+        except ScanSessionChanged:
+            raise HTTPException(status_code=401, detail="Your connection changed during the scan. Reopen the workspace and try again.") from None
+        except ScanDataError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from None
+        finally:
+            scan_lock.release()
 
     @app.post("/api/logout", response_model=SessionStatus)
     def logout(request: Request, response: Response):
