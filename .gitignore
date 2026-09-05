@@ -37,3 +37,10 @@ access_token*
 .DS_Store
 Thumbs.db
 *.zip
+
+# Standalone scanner private input and generated output
+credentials.txt
+*credentials*.txt
+Zerodha API app.txt
+*token*.txt
+nifty100_ema_signals.csv

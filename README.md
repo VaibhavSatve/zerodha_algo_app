@@ -13,6 +13,79 @@ cd zerodha_algo_app
 
 The repository root is the `kite-workspace` directory referred to below.
 
+## Standalone Nifty 100 EMA scanner
+
+The single file `nifty100_ema_scanner.py` scans **EMA 6 / EMA 21** across **Daily, 5 Minute, 15 Minute, 1 Hour, and 4 Hour** candles. It runs independently of the React/FastAPI dashboard. You do not need to start either web server for this scanner.
+
+### Install once (Windows PowerShell)
+
+Open PowerShell in your existing project folder:
+
+```powershell
+cd "D:\Personal\Trading\Algo Trading App"
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install kiteconnect pandas requests
+```
+
+For a fresh clone elsewhere, replace the `cd` path with that clone's directory. Python 3.11+ is required. The script directly imports only `kiteconnect`, `pandas`, `requests`, and standard-library modules; no technical-analysis packages are used. pandas installs its own normal dependencies automatically.
+
+### Credentials and login
+
+Keep your existing `credentials.txt` in the same directory as the script, using these labels and your real values locally:
+
+```text
+API Key = your_api_key
+API Secret = your_api_secret
+```
+
+A colon instead of `=`, underscores, and a `Kite` prefix on the labels are also accepted. Do not commit this file or paste real values into Python source. Both credential text files currently used in this folder are excluded by `.gitignore`.
+
+### Run again tomorrow
+
+```powershell
+cd "D:\Personal\Trading\Algo Trading App"
+.\.venv\Scripts\python.exe .\nifty100_ema_scanner.py
+```
+
+The script opens Kite's official login in your browser. Complete the login, copy the `request_token` value from your app's registered redirect address, then paste it at the **hidden terminal prompt**. If your redirect points to the local dashboard and the web server is stopped, the address still contains the request token even when the redirect page cannot load. Copy only the token value, ending before the next `&`.
+
+Use a **fresh** request token for each run: Kite request tokens are single-use and expire quickly. Authentication calls `KiteConnect.generate_session()`. The access token stays in process memory; this standalone script does not persist it or reuse the dashboard's session file. The API secret, request token, and access token are never printed or placed in the CSV. Private automation can pass a request token through `KITE_REQUEST_TOKEN`; do not put it in command history or source code.
+
+### What the scan does
+
+1. Downloads the current [official Nifty 100 constituents CSV](https://www.niftyindices.com/IndexConstituent/ind_nifty100list.csv). There is no hardcoded stock list.
+2. Downloads Kite's NSE instrument master once and matches exact constituent symbols to `exchange=NSE`, `segment=NSE`, `instrument_type=EQ`. Only official equity members are selected. Missing or ambiguous mappings are skipped with a warning.
+3. Fetches four native histories per stock: `day` (365 calendar days), `5minute` (30 days), `15minute` (60 days), and `60minute` (180 days). Hourly data is reused for 4 Hour analysis, so there is no duplicate hourly API call.
+4. Uses one IST snapshot captured at scan start. A candle is eligible only once its end is at or before that snapshot. Today's Daily candle is excluded until 15:30 IST. Intraday processing covers the normal NSE cash session, 09:15–15:30 IST; special sessions outside these hours are not modeled.
+5. Calculates `close.ewm(span=6, adjust=False).mean()` and `close.ewm(span=21, adjust=False).mean()`. At least 22 completed observations are required; the first 21 observations are warm-up, and crossovers require both the previous and current EMA values. Longer downloaded histories reduce initialization effects, though values can differ from a chart using a different starting history.
+6. Finds the most recent **actual** bullish or bearish crossover for each stock/timeframe, including older crossovers inside the fetched history. Above/below state alone never qualifies. Missing intraday candle gaps are not treated as adjacent comparisons.
+7. Sorts all results by the full crossover timestamp descending, then by Symbol and Timeframe for deterministic ties. Rounding to two decimal places happens only after detection and sorting.
+
+### 4 Hour candle convention
+
+Kite has no native 4-hour historical interval. The script uses pandas OHLCV resampling, anchored to **09:15 IST separately for every trading day**:
+
+- **09:15–13:15:** four complete hourly source candles.
+- **13:15–15:30:** the shorter closing session bar. Its final hourly source candle starts at 15:15 and completes at 15:30.
+
+The closing bar is a completed session bar, not a full four hours of trading. Neither bar is emitted before its session-adjusted closing time, and all expected source candles must be present. Bars never span the overnight closure. This convention is explicit because platforms can use different 4-hour session alignment.
+
+### Output and failures
+
+The complete ranked table is printed in the terminal and saved to **`nifty100_ema_signals.csv` beside the script**, overwriting the previous results after a scan. Columns are:
+
+`Rank, Symbol, Company, Timeframe, Signal Type, Crossover Date, Close, EMA 6, EMA 21`
+
+**Crossover Date includes both date and time in IST and labels the candle start**, as Kite does. Daily labels are the daily candle's original timestamp. Each row's Close/EMA values belong to its crossover candle, not the latest quote. Rank 1 is the newest crossover timestamp among all returned rows.
+
+The summary lists symbols loaded/mapped, stock/timeframe combinations attempted, combinations with sufficient data, bullish/bearish counts, and the CSV path. No signals produces a header-only CSV. Generated CSVs and credentials are ignored by Git.
+
+Historical calls are spaced by 0.55 seconds, below [Kite's historical limit of 3 requests per second](https://kite.trade/docs/connect/v3/exceptions/). Rate limits, network failures, and upstream server errors get at most two retries with 2- and 4-second waits. A full 100-stock scan takes several minutes. Each failed stock/timeframe is skipped; authentication expiry stops further API calls and saves partial results. Ctrl+C during scanning also saves already collected results. Setup/login failures preserve the previous CSV and clearly report that no new scan started.
+
+If all histories fail, check that your Kite app has **historical-data access** enabled. Close the CSV in Excel before rerunning if Windows reports a file-write error.
+
+See [Kite historical-candle documentation](https://kite.trade/docs/connect/v3/historical/) for native intervals and data fields.
+
 ## Requirements
 
 - Node.js **22.12+** (or 24 LTS) and pnpm **11**. If needed, install pnpm with `npm install -g pnpm@11`.
@@ -160,4 +233,4 @@ This public repository is the maintained source of truth. Completed development 
 
 Before starting, fetch remote changes and integrate them without discarding local work. Before each push, review `git status` and `git diff --cached`; stage only intended source paths. `.gitignore` excludes local sessions, credentials, dependencies, virtual environments, builds, logs, and archives. It does not remove secrets that were already tracked.
 
-Never paste real credentials into source files, tests, issues, or commit messages. The test suite contains intentionally fake credentials. Keep live credentials in the login form and backend session store only, as described above.
+Never paste real credentials into source files, tests, issues, or commit messages. The test suite contains intentionally fake credentials. Keep live credentials in the local login form/backend session store or the scanner's ignored credentials.txt file, as described above.
