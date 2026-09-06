@@ -73,6 +73,8 @@ The request requires the existing session cookie and `X-Kite-Client: local-web`.
 
 Historical calls wait 0.55 seconds between requests. Rate-limit (429), network, and server failures retry at most twice with 2- and 4-second backoffs, within [Kite's historical API rate limit](https://kite.trade/docs/connect/v3/exceptions/). An individual stock failure adds a warning and other stocks continue. Empty data, insufficient history, and missing mappings are shown in expandable details. No crossovers is a valid empty result. If no stocks could be analyzed, check that your Kite app has historical-data access.
 
+If source candles are missing, incomplete 4-hour buckets are excluded. For example, without the 15:15 hourly candle, the 13:15–15:30 closing bar cannot be completed. The scanner does not fill that gap or compare across the missing bar. When the selected lookback contains no valid consecutive completed pair, the stock receives a data-availability warning instead of being reported as a successful scan with no crossover.
+
 Expired/revoked sessions stop the scan and return you to login; temporary outages preserve the saved session. Disconnecting or replacing the login during a scan stops further requests for that old session. Browser requests allow up to 20 minutes for a large scan; a network interruption can leave the backend finishing the current scan, and duplicate requests remain blocked until it exits. Scans are read-only and place no orders.
 
 Backend checks: from the project root, `cd backend` and run `..\.venv\Scripts\python.exe -m pytest -q`. Frontend check from the project root: `pnpm --dir frontend build`. Tests use synthetic candles and mocked Kite responses, with no live credentials.

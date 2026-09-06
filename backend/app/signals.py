@@ -219,6 +219,8 @@ def latest_crossover(candles, parameters, lookback_start):
     overnight = (frame.index.strftime("%H:%M") == "09:15") & (previous.dt.strftime("%H:%M") == last_start)
     eligible = ((same_day & adjacent) | (~same_day & overnight)) & (frame.index >= lookback_start)
     eligible.iloc[:parameters.long_ema] = False
+    if not eligible.any():
+        raise ScanDataError("No consecutive completed candles in the lookback. Source candles are missing or outside this period; skipped.")
     crossings = frame.loc[(bullish | bearish) & eligible]
     if crossings.empty:
         return None

@@ -94,6 +94,21 @@ def test_four_hour_ohlcv_completion_and_no_overnight_mix():
     assert len(signals.resample_4hour(missing, NOW)) == 3
 
 
+def test_four_hour_crossovers_need_consecutive_complete_session_bars():
+    # A full sequence has both morning and closing bars each session.
+    stamps = [day + timedelta(hours=hour, minutes=15)
+              for day in pd.date_range('2026-07-27', periods=30, freq='B', tz=signals.IST)
+              for hour in (9, 13)]
+    frame = pd.DataFrame({'close': [100] * (len(stamps)-1) + [105]}, index=stamps)
+    parameters = signals.ScanParameters(timeframe='4hour')
+    result = signals.latest_crossover(frame, parameters, NOW - timedelta(days=30))
+    assert result['crossover_type'] == 'Bullish'
+    # If every closing bar lacks hourly source data, mornings must not be bridged.
+    mornings = frame.loc[frame.index.hour == 9]
+    with pytest.raises(signals.ScanDataError, match='No consecutive completed candles'):
+        signals.latest_crossover(mornings, parameters, NOW - timedelta(days=30))
+
+
 @pytest.mark.parametrize("direction,last", [("Bullish", 102), ("Bearish", 98)])
 def test_equality_is_a_genuine_crossover_and_rounding_is_only_for_output(direction, last):
     frame = signals.completed_candles(candles([100] * 30 + [last, last]), "5minute", NOW)
@@ -137,7 +152,8 @@ def test_cross_between_consecutive_sessions_is_included():
     result = signals.latest_crossover(frame, signals.ScanParameters(), NOW - timedelta(days=1))
     assert result["crossover_time"] == "09:15"
     # An absent previous session closing bar cannot be bridged.
-    assert signals.latest_crossover(frame.drop(frame.index[-2]), signals.ScanParameters(), NOW - timedelta(days=1)) is None
+    with pytest.raises(signals.ScanDataError, match='No consecutive completed candles'):
+        signals.latest_crossover(frame.drop(frame.index[-2]), signals.ScanParameters(), NOW - timedelta(days=1))
 
 
 def test_dynamic_periods_and_insufficient_data():
