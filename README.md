@@ -48,7 +48,7 @@ Open [http://127.0.0.1:5173](http://127.0.0.1:5173), connect with the existing l
 
 1. Choose **Short EMA** (default 6), **Long EMA** (21), **Timeframe** (5 Minute), **Lookback Days** (30), and **Max Stocks** (100).
 2. Click **Generate Signals**. Inputs and the button are disabled while scanning. You can switch dashboard tabs and return without losing the scan. Keep the page open; a full scan takes several minutes, especially for 4 Hour or longer lookbacks.
-3. Read the newest crossover first. Green ↑ means Bullish; red ↓ means Bearish. Search by ticker/company and filter All/Bullish/Bearish. Filtering preserves the original ranks from the full scan.
+3. Read the newest crossover first. Each row includes its **Timeframe**, returned by the backend, and separate Crossover Date and Crossover Time (IST) columns. Green ↑ means Bullish; red ↓ means Bearish. Search by ticker/company and filter All/Bullish/Bearish. Filtering preserves the original ranks from the full scan.
 4. Changing parameters clears the old results to avoid relabeling old values. EMA column headings follow your chosen periods. Generate again to calculate the new values.
 
 Whole-number limits: `1 <= Short EMA < Long EMA <= 100`, Lookback Days **1–90**, Max Stocks **1–100**. Max Stocks selects the first N official constituents in ticker order; it does not truncate the newest N signals after scanning. Missing mappings are skipped. Stocks Scanned counts mapped stocks attempted; the table footer counts stocks with sufficient valid data. The summary includes signals, bullish/bearish totals, selected timeframe, and last generation time.

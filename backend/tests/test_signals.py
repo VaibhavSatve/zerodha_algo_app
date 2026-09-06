@@ -223,6 +223,7 @@ def test_endpoint_reuses_session_and_returns_only_public_fields(api_setup):
     assert data["signals_found"] == 2
     assert [row["ticker"] for row in data["signals"]] == ["AAA", "BBB"]
     assert data["parameters"]["short_ema"] == 6
+    assert {row["timeframe"] for row in data["signals"]} == {"5minute"}
     sdk.generate_session.assert_called_once()
     sdk.set_access_token.assert_called_with(FAKE_TOKEN)
     for secret in (FAKE_TOKEN, "fake-key", "fake-secret", "fake-request", "instrument_token", "api_key", "access_token"):

@@ -4,7 +4,7 @@ export type Credentials = { api_key: string; api_secret: string; request_token: 
 export type Timeframe = '5minute' | '15minute' | '60minute' | '4hour'
 export type ScanParameters = { short_ema: number; long_ema: number; timeframe: Timeframe; lookback_days: number; max_stocks: number }
 export type Signal = {
-  rank: number; ticker: string; company: string; crossover_type: 'Bullish' | 'Bearish'
+  rank: number; ticker: string; company: string; timeframe: Timeframe; crossover_type: 'Bullish' | 'Bearish'
   crossover_at: string; crossover_date: string; crossover_time: string
   close: number; short_ema: number; long_ema: number
 }

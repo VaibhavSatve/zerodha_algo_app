@@ -47,6 +47,7 @@ class Signal(BaseModel):
     rank: int
     ticker: str
     company: str
+    timeframe: Timeframe
     crossover_type: Literal["Bullish", "Bearish"]
     crossover_at: datetime
     crossover_date: str
@@ -251,7 +252,7 @@ def scan(kite, parameters: ScanParameters, check_session: Callable, as_of=None):
             signal = latest_crossover(candles, parameters, lookback_start)
             analyzed += 1
             if signal:
-                signals.append({"ticker": stock["ticker"], "company": stock["company"], **signal})
+                signals.append({"ticker": stock["ticker"], "company": stock["company"], "timeframe": parameters.timeframe, **signal})
         except (TokenException, ScanSessionChanged):
             raise
         except ScanDataError as error:
