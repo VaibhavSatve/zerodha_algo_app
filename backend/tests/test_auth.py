@@ -191,3 +191,28 @@ def test_failed_persistence_never_sets_browser_cookie(setup, monkeypatch):
 def test_models_redact_secrets_in_representations():
     assert API_SECRET not in repr(LoginBody(**CREDENTIALS))
     assert REQUEST_TOKEN not in repr(LoginBody(**CREDENTIALS))
+
+
+def test_redirect_url_extracts_token_before_sdk(setup):
+    client, sdk, _, _ = setup
+    payload = {**CREDENTIALS, "request_token": "http://127.0.0.1:5173/login?request_token=" + REQUEST_TOKEN + "&status=success"}
+    assert client.post("/api/login", json=payload, headers=HEADERS).status_code == 200
+    sdk.generate_session.assert_called_once_with(REQUEST_TOKEN, api_secret=API_SECRET)
+
+
+def test_checksum_error_is_actionable_and_redacted(setup):
+    client, sdk, _, _ = setup
+    sdk.generate_session.side_effect = TokenException("Invalid checksum " + API_SECRET)
+    response = client.post("/api/login", json=CREDENTIALS, headers=HEADERS)
+    assert response.status_code == 401
+    assert "same Kite developer app" in response.text
+    assert API_SECRET not in response.text
+
+
+def test_network_error_does_not_blame_token(setup):
+    client, sdk, _, _ = setup
+    sdk.generate_session.side_effect = ConnectionError(API_SECRET)
+    response = client.post("/api/login", json=CREDENTIALS, headers=HEADERS)
+    assert response.status_code == 503
+    assert "network connection" in response.text
+    assert API_SECRET not in response.text

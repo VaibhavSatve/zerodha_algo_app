@@ -35,9 +35,9 @@ function Login({ onLogin, working }: { onLogin: (value: Credentials) => Promise<
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const credentials = Object.fromEntries(Object.entries(form).map(([key, value]) => [key, value.trim()])) as Credentials
-    setForm(blankCredentials)
     setReveal(false)
-    await onLogin(credentials)
+    const success = await onLogin(credentials)
+    setForm(success ? blankCredentials : { ...credentials, request_token: '' })
   }
   function openKite() {
     if (!form.api_key.trim()) { setLinkError('Enter your API key first to open the correct Kite login page.'); return }
@@ -52,7 +52,7 @@ function Login({ onLogin, working }: { onLogin: (value: Credentials) => Promise<
         <form onSubmit={submit} autoComplete="off">
           <div className="field"><label htmlFor="api-key">API Key</label><div className="input-wrap"><KeyRound size={17} /><input id="api-key" name="api_key" value={form.api_key} onChange={e => setForm({ ...form, api_key: e.target.value })} placeholder="Enter your API key" required maxLength={256} spellCheck={false} disabled={working} /></div><p>Available in your <a href="https://developers.kite.trade/" target="_blank" rel="noreferrer">Kite developer console <ArrowUpRight size={12} /></a></p></div>
           <div className="field"><label htmlFor="api-secret">API Secret <LockKeyhole size={12} /></label><div className="input-wrap"><LockKeyhole size={17} /><input id="api-secret" name="api_secret" type={reveal ? 'text' : 'password'} value={form.api_secret} onChange={e => setForm({ ...form, api_secret: e.target.value })} placeholder="Enter your API secret" required maxLength={512} autoComplete="new-password" spellCheck={false} disabled={working} /><button className="icon-button" type="button" onClick={() => setReveal(!reveal)} aria-label={reveal ? 'Hide API secret' : 'Show API secret'} aria-pressed={reveal}>{reveal ? <EyeOff size={17} /> : <Eye size={17} />}</button></div></div>
-          <div className="field"><div className="label-row"><label htmlFor="request-token">Request Token</label><button type="button" className="text-button" onClick={openKite} disabled={working}>Get request token <ArrowUpRight size={13} /></button></div><div className="input-wrap"><Fingerprint size={18} /><input id="request-token" name="request_token" type="password" value={form.request_token} onChange={e => setForm({ ...form, request_token: e.target.value })} placeholder="Paste your request token" required maxLength={512} autoComplete="new-password" spellCheck={false} disabled={working} /></div><p>The one-time token from your Kite login redirect URL.</p></div>
+          <div className="field"><div className="label-row"><label htmlFor="request-token">Request Token</label><button type="button" className="text-button" onClick={openKite} disabled={working}>Get request token <ArrowUpRight size={13} /></button></div><div className="input-wrap"><Fingerprint size={18} /><input id="request-token" name="request_token" type="password" value={form.request_token} onChange={e => setForm({ ...form, request_token: e.target.value })} placeholder="Paste your request token or redirect URL" required maxLength={512} autoComplete="new-password" spellCheck={false} disabled={working} /></div><p>Paste the token value or the complete redirect URL. Use the same API key and secret that generated it.</p></div>
           {linkError && <p className="field-error" role="alert">{linkError}</p>}
           <button className="primary-button" type="submit" disabled={working}>{working ? <><LoaderCircle className="spin" size={18} /> Connecting…</> : <>Login to workspace <ArrowRight size={18} /></>}</button>
           <div className="form-footnote"><ShieldCheck size={15} /><span>Your access token stays on the backend.</span></div>

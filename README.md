@@ -301,3 +301,12 @@ This public repository is the maintained source of truth. Completed development 
 Before starting, fetch remote changes and integrate them without discarding local work. Before each push, review `git status` and `git diff --cached`; stage only intended source paths. `.gitignore` excludes local sessions, credentials, dependencies, virtual environments, builds, logs, and archives. It does not remove secrets that were already tracked.
 
 Never paste real credentials into source files, tests, issues, or commit messages. The test suite contains intentionally fake credentials. Keep live credentials in the local login form/backend session store or the scanner's ignored credentials.txt file, as described above.
+
+
+### Troubleshooting login
+
+Use the API key and API secret from the **same Kite developer app**. Your Zerodha user ID is not the API key. Enter that key before choosing **Get request token**, and submit promptly after login. You can paste either the token value or the complete redirect URL. Do not reuse old tokens.
+
+The form retains the key and secret only in current component memory after an unsuccessful attempt, with the secret masked; it clears the request token. Reloading clears the form. No credentials are saved to browser storage.
+
+Checksum errors require checking the matching key, secret, and token; generating tokens alone will not correct a mismatched secret. Network errors require checking connectivity from the backend process. Restart a backend launched in a restricted environment from a normal local terminal. The app distinguishes these errors without displaying raw Kite error payloads.

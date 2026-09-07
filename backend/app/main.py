@@ -10,6 +10,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Callable
+from urllib.parse import urlsplit, parse_qs
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -37,6 +38,16 @@ class LoginBody(BaseModel):
     api_key: SecretStr
     api_secret: SecretStr
     request_token: SecretStr
+
+    @field_validator("request_token", mode="before")
+    @classmethod
+    def extract_request_token(cls, value):
+        if isinstance(value, str) and value.strip().startswith(("http://", "https://")):
+            tokens = parse_qs(urlsplit(value.strip()).query).get("request_token", [])
+            if len(tokens) != 1:
+                raise ValueError("Paste a redirect URL containing exactly one request token.")
+            return tokens[0]
+        return value
 
     @field_validator("api_key", "api_secret", "request_token")
     @classmethod
@@ -127,10 +138,22 @@ def create_app(store_path: Path = DEFAULT_STORE, kite_factory: Callable = KiteCo
             try:
                 kite = kite_factory(api_key=body.api_key.get_secret_value(), timeout=10, debug=False)
                 data = kite.generate_session(body.request_token.get_secret_value(), api_secret=body.api_secret.get_secret_value())
-            except (TokenException, InputException, PermissionException):
-                raise HTTPException(status_code=401, detail="Kite could not verify your credentials. Check your API key and secret, then get a fresh request token.") from None
+            except (TokenException, InputException, PermissionException) as error:
+                # Classify upstream messages without returning or logging their contents.
+                message = str(error).lower()
+                if "checksum" in message:
+                    detail = "Kite rejected the login checksum. Use the API key and API secret from the same Kite developer app that generated this request token. A new token alone will not fix mismatched credentials."
+                elif "api_key" in message or "api key" in message:
+                    detail = "Kite rejected the API key. Copy the API key from your Kite developer app (not your Zerodha user ID), then generate a token using that same key."
+                elif "request_token" in message or "request token" in message:
+                    detail = "Kite rejected the request token. It may be expired, already used, or issued for another API key. Generate it using Get request token in this form and submit promptly."
+                elif isinstance(error, PermissionException):
+                    detail = "Kite denied access to this app. Check its status and permissions in the Kite developer console."
+                else:
+                    detail = "Kite rejected this login. Verify that the API key and secret belong to the same developer app used to generate the token; then generate and submit a new token."
+                raise HTTPException(status_code=401, detail=detail) from None
             except (KiteException, RequestException):
-                raise HTTPException(status_code=503, detail="Could not connect to Kite. Please try again with a fresh request token.") from None
+                raise HTTPException(status_code=503, detail="The backend could not reach Kite or Kite is temporarily unavailable. Check the backend network connection and retry. This does not mean your credentials are invalid.") from None
             access_token = data.get("access_token")
             if not isinstance(access_token, str) or not access_token:
                 raise HTTPException(status_code=502, detail="Kite did not create a session. Get a fresh request token and try again.")
