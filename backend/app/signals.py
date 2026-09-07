@@ -18,6 +18,7 @@ NIFTY100_URL = "https://www.niftyindices.com/IndexConstituent/ind_nifty100list.c
 Timeframe = Literal["5minute", "15minute", "60minute", "4hour"]
 INTERVAL_MINUTES = {"5minute": 5, "15minute": 15, "60minute": 60, "4hour": 240}
 REQUEST_GAP = 0.55  # Below Kite's historical-data limit of three calls/second.
+MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 
 
 class ScanDataError(ValueError):
@@ -55,6 +56,13 @@ class Signal(BaseModel):
     close: float
     short_ema: float
     long_ema: float
+    macd: float
+    macd_signal: float
+    previous_candle_at: datetime
+    previous_short_ema: float
+    previous_long_ema: float
+    previous_macd: float
+    previous_macd_signal: float
 
 
 class ScanWarning(BaseModel):
@@ -139,7 +147,7 @@ def kite_call(operation: Callable, check_session: Callable):
 
 
 def fetch_candles(kite, token, interval, start, end, check_session):
-    """Chunk requests into at most 60 calendar days, including EMA warm-up."""
+    """Chunk requests into at most 60 calendar days, including indicator warm-up."""
     records = []
     cursor = start
     while cursor < end:
@@ -204,38 +212,60 @@ def resample_4hour(hourly, as_of):
     return pd.concat(pieces).sort_index() if pieces else pd.DataFrame()
 
 
+def warmup_bars(parameters):
+    # Five spans for EMA convergence; MACD has two successive smoothing stages.
+    # Enforce this on actual completed/resampled bars, not estimated calendar days.
+    return 5 * max(parameters.long_ema, MACD_SLOW + MACD_SIGNAL)
+
+
 def latest_crossover(candles, parameters, lookback_start):
-    if len(candles) < parameters.long_ema + 1:
-        raise ScanDataError("Insufficient completed candles for these EMA periods; skipped.")
+    warmup = warmup_bars(parameters)
+    if len(candles) < warmup + 1:
+        raise ScanDataError(f"Insufficient completed candles for EMA + MACD: need at least {warmup + 1}, received {len(candles)}; skipped.")
     frame = candles.copy()
     short = frame["close"].ewm(span=parameters.short_ema, adjust=False).mean()
     long = frame["close"].ewm(span=parameters.long_ema, adjust=False).mean()
-    bullish = (short.shift(1) <= long.shift(1)) & (short > long)
-    bearish = (short.shift(1) >= long.shift(1)) & (short < long)
+    macd = (frame["close"].ewm(span=MACD_FAST, adjust=False).mean()
+            - frame["close"].ewm(span=MACD_SLOW, adjust=False).mean())
+    macd_signal = macd.ewm(span=MACD_SIGNAL, adjust=False).mean()
+    # Both changes must occur across the SAME adjacent pair of completed bars.
+    bullish = ((short.shift(1) <= long.shift(1)) & (short > long)
+               & (macd.shift(1) <= macd_signal.shift(1)) & (macd > macd_signal))
+    bearish = ((short.shift(1) >= long.shift(1)) & (short < long)
+               & (macd.shift(1) >= macd_signal.shift(1)) & (macd < macd_signal))
     previous = frame.index.to_series().shift(1)
     same_day = frame.index.normalize() == pd.DatetimeIndex(previous).normalize()
     adjacent = frame.index.to_series() - previous == pd.Timedelta(minutes=INTERVAL_MINUTES[parameters.timeframe])
     last_start = {"5minute": "15:25", "15minute": "15:15", "60minute": "15:15", "4hour": "13:15"}[parameters.timeframe]
     overnight = (frame.index.strftime("%H:%M") == "09:15") & (previous.dt.strftime("%H:%M") == last_start)
     eligible = ((same_day & adjacent) | (~same_day & overnight)) & (frame.index >= lookback_start)
-    eligible.iloc[:parameters.long_ema] = False
+    eligible.iloc[:warmup] = False
     if not eligible.any():
         raise ScanDataError("No consecutive completed candles in the lookback. Source candles are missing or outside this period; skipped.")
     crossings = frame.loc[(bullish | bearish) & eligible]
     if crossings.empty:
         return None
     stamp = crossings.index[-1]
+    previous_stamp = previous.loc[stamp]
     return {"crossover_type": "Bullish" if bullish.loc[stamp] else "Bearish",
             "crossover_at": stamp.to_pydatetime(), "crossover_date": stamp.strftime("%Y-%m-%d"),
             "crossover_time": stamp.strftime("%H:%M"), "close": round(float(frame.loc[stamp, "close"]), 2),
-            "short_ema": round(float(short.loc[stamp]), 2), "long_ema": round(float(long.loc[stamp]), 2)}
+            # Keep indicator precision in the API so both inequalities can be verified.
+            # The table formats these values to two decimals, after detection.
+            "short_ema": float(short.loc[stamp]), "long_ema": float(long.loc[stamp]),
+            "macd": float(macd.loc[stamp]), "macd_signal": float(macd_signal.loc[stamp]),
+            "previous_candle_at": previous_stamp.to_pydatetime(),
+            "previous_short_ema": float(short.loc[previous_stamp]),
+            "previous_long_ema": float(long.loc[previous_stamp]),
+            "previous_macd": float(macd.loc[previous_stamp]),
+            "previous_macd_signal": float(macd_signal.loc[previous_stamp])}
 
 
 def scan(kite, parameters: ScanParameters, check_session: Callable, as_of=None):
     as_of = as_of or datetime.now(IST)
     lookback_start = as_of - timedelta(days=parameters.lookback_days)
     bars_per_day = {"5minute": 75, "15minute": 25, "60minute": 7, "4hour": 2}[parameters.timeframe]
-    warmup_days = math.ceil(parameters.long_ema * 5 / bars_per_day * 7 / 5) + 14
+    warmup_days = math.ceil(warmup_bars(parameters) / bars_per_day * 7 / 5) + 14
     start = (lookback_start - timedelta(days=warmup_days)).replace(hour=0, minute=0, second=0, microsecond=0)
     members = load_constituents()[:parameters.max_stocks]
     instruments = kite_call(lambda: kite.instruments("NSE"), check_session)

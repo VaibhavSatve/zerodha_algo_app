@@ -25,6 +25,15 @@ def candles(closes, start="2026-09-04 09:15", frequency="5min"):
                          "low": [value - 1 for value in closes], "close": closes, "volume": 10})
 
 
+def scanner_candles(closes, start="2026-09-04 09:15", frequency="5min"):
+    """Existing scanner scenarios with mature indicators from earlier sessions."""
+    raw = candles(closes, start, frequency)
+    first = raw.date.iloc[0]
+    earlier = pd.concat([candles([closes[0]] * 75, start=str(day.date()) + " 09:15")
+                         for day in pd.bdate_range(end=first.normalize() - timedelta(days=1), periods=4)])
+    return pd.concat([earlier, raw], ignore_index=True)
+
+
 def instrument(symbol, token=1, **overrides):
     return {"exchange": "NSE", "segment": "NSE", "instrument_type": "EQ",
             "tradingsymbol": symbol, "instrument_token": token, **overrides}
@@ -41,7 +50,7 @@ def api_setup(tmp_path, monkeypatch):
     sdk.generate_session.return_value = {"access_token": FAKE_TOKEN}
     sdk.profile.return_value = {"user_name": "Test User", "user_id": "TEST", "products": [], "exchanges": []}
     sdk.instruments.return_value = [instrument("AAA"), instrument("BBB", 2)]
-    sdk.historical_data.return_value = candles([100] * 30 + [102, 104]).to_dict("records")
+    sdk.historical_data.return_value = scanner_candles([100] * 30 + [102, 104]).to_dict("records")
     monkeypatch.setattr(signals, "load_constituents", lambda: [
         {"ticker": "AAA", "company": "Alpha Company"}, {"ticker": "BBB", "company": "Beta Company"}])
     monkeypatch.setattr("app.main.scan", lambda kite, parameters, guard: signals.scan(kite, parameters, guard, NOW))
@@ -97,7 +106,7 @@ def test_four_hour_ohlcv_completion_and_no_overnight_mix():
 def test_four_hour_crossovers_need_consecutive_complete_session_bars():
     # A full sequence has both morning and closing bars each session.
     stamps = [day + timedelta(hours=hour, minutes=15)
-              for day in pd.date_range('2026-07-27', periods=30, freq='B', tz=signals.IST)
+              for day in pd.bdate_range(end='2026-09-04', periods=190, tz=signals.IST)
               for hour in (9, 13)]
     frame = pd.DataFrame({'close': [100] * (len(stamps)-1) + [105]}, index=stamps)
     parameters = signals.ScanParameters(timeframe='4hour')
@@ -111,43 +120,43 @@ def test_four_hour_crossovers_need_consecutive_complete_session_bars():
 
 @pytest.mark.parametrize("direction,last", [("Bullish", 102), ("Bearish", 98)])
 def test_equality_is_a_genuine_crossover_and_rounding_is_only_for_output(direction, last):
-    frame = signals.completed_candles(candles([100] * 30 + [last, last]), "5minute", NOW)
+    frame = signals.completed_candles(scanner_candles([100] * 30 + [last, last]), "5minute", NOW)
     result = signals.latest_crossover(frame, signals.ScanParameters(), NOW - timedelta(days=1))
     assert result["crossover_type"] == direction
     assert result["crossover_time"] == "11:45"  # Latest candle is 11:50; crossover was earlier.
-    assert result["short_ema"] == round(frame.close.ewm(span=6, adjust=False).mean().iloc[-2], 2)
+    assert result["short_ema"] == frame.close.ewm(span=6, adjust=False).mean().iloc[-2]
 
 
 def test_above_or_below_alone_never_generates_a_signal():
     for closes in (list(range(100, 150)), list(range(150, 100, -1)), [100] * 50):
-        frame = signals.completed_candles(candles(closes), "5minute", NOW)
-        assert signals.latest_crossover(frame, signals.ScanParameters(), NOW - timedelta(days=1)) is None
+        frame = signals.completed_candles(scanner_candles(closes), "5minute", NOW)
+        assert signals.latest_crossover(frame, signals.ScanParameters(), frame.index[-10]) is None
 
 
 def test_most_recent_actual_cross_and_lookback_cutoff():
-    frame = signals.completed_candles(candles([100] * 30 + [110] * 5 + [90] * 5), "5minute", NOW)
+    frame = signals.completed_candles(scanner_candles([100] * 30 + [110] * 10 + [90] * 10), "5minute", NOW)
     result = signals.latest_crossover(frame, signals.ScanParameters(), NOW - timedelta(days=1))
     assert result["crossover_type"] == "Bearish"
     assert signals.latest_crossover(frame, signals.ScanParameters(), result["crossover_at"] + timedelta(seconds=1)) is None
 
 
 def test_missing_intraday_candle_cannot_create_a_cross():
-    frame = signals.completed_candles(candles([100] * 30 + [110]), "5minute", NOW)
+    frame = signals.completed_candles(scanner_candles([100] * 30 + [110]), "5minute", NOW)
     assert signals.latest_crossover(frame.drop(frame.index[-2]), signals.ScanParameters(), NOW - timedelta(days=1)) is None
 
 
 def test_forming_spike_and_rounded_equality_do_not_change_detection():
-    raw = candles([100] * 30 + [100.0001])
+    raw = scanner_candles([100] * 30 + [100.0001])
     cutoff = raw.date.iloc[-1] + timedelta(minutes=4)
     completed = signals.completed_candles(raw, "5minute", cutoff)
     assert signals.latest_crossover(completed, signals.ScanParameters(), NOW - timedelta(days=1)) is None
     completed = signals.completed_candles(raw, "5minute", cutoff + timedelta(minutes=1))
     result = signals.latest_crossover(completed, signals.ScanParameters(), NOW - timedelta(days=1))
-    assert result["crossover_type"] == "Bullish" and result["short_ema"] == result["long_ema"] == 100
+    assert result["crossover_type"] == "Bullish" and round(result["short_ema"], 2) == round(result["long_ema"], 2) == 100
 
 
 def test_cross_between_consecutive_sessions_is_included():
-    raw = pd.concat([candles([100] * 75, start="2026-09-03 09:15"), candles([105])])
+    raw = pd.concat([scanner_candles([100] * 75, start="2026-09-03 09:15"), candles([105])])
     frame = signals.completed_candles(raw, "5minute", NOW)
     result = signals.latest_crossover(frame, signals.ScanParameters(), NOW - timedelta(days=1))
     assert result["crossover_time"] == "09:15"
@@ -157,9 +166,9 @@ def test_cross_between_consecutive_sessions_is_included():
 
 
 def test_dynamic_periods_and_insufficient_data():
-    frame = signals.completed_candles(candles([100] * 30 + [102]), "5minute", NOW)
+    frame = signals.completed_candles(scanner_candles([100] * 30 + [102]), "5minute", NOW)
     result = signals.latest_crossover(frame, signals.ScanParameters(short_ema=9), NOW - timedelta(days=1))
-    assert result["short_ema"] == round(frame.close.ewm(span=9, adjust=False).mean().iloc[-1], 2)
+    assert result["short_ema"] == frame.close.ewm(span=9, adjust=False).mean().iloc[-1]
     with pytest.raises(signals.ScanDataError):
         signals.latest_crossover(frame.iloc[:21], signals.ScanParameters(), NOW - timedelta(days=1))
 
@@ -209,8 +218,8 @@ def test_scan_ranks_full_timestamps_and_limits_selected_stocks(monkeypatch):
         {"ticker": name, "company": name} for name in ("AAA", "BBB", "CCC", "DDD")])
     sdk = MagicMock()
     sdk.instruments.return_value = [instrument(name, index) for index, name in enumerate(("AAA", "BBB", "CCC", "DDD"), 1)]
-    sdk.historical_data.side_effect = [candles([100] * 30 + [102], start="2026-09-03 09:15").to_dict("records"),
-                                     candles([100] * 30 + [102]).to_dict("records"), candles([100] * 32 + [98]).to_dict("records")]
+    sdk.historical_data.side_effect = [scanner_candles([100] * 30 + [102], start="2026-09-03 09:15").to_dict("records"),
+                                     scanner_candles([100] * 30 + [102]).to_dict("records"), scanner_candles([100] * 32 + [98]).to_dict("records")]
     result = signals.scan(sdk, signals.ScanParameters(max_stocks=3), lambda: None, NOW)
     assert [row.ticker for row in result.signals] == ["CCC", "BBB", "AAA"]
     assert [row.rank for row in result.signals] == [1, 2, 3]
@@ -226,7 +235,7 @@ def test_four_hour_uses_hourly_once_and_fetches_warmup(monkeypatch):
     result = signals.scan(sdk, signals.ScanParameters(timeframe="4hour"), lambda: None, NOW)
     assert result.stocks_scanned == 1 and result.stocks_analyzed == 0
     calls = sdk.historical_data.call_args_list
-    assert len(calls) == 2  # 30-day lookback plus 88 warm-up days, in 60-day chunks.
+    assert len(calls) == 3  # 30-day lookback plus 137 MACD warm-up days, in 60-day chunks.
     assert all(call.args[3] == "60minute" for call in calls)
     assert calls[0].args[1] < result.lookback_start
 
@@ -258,7 +267,7 @@ def test_invalid_queries_do_not_call_kite_or_echo_inputs(api_setup, query):
 
 def test_individual_failure_does_not_stop_other_stocks(api_setup):
     client, sdk, path, _, _ = api_setup
-    sdk.historical_data.side_effect = [RuntimeError(FAKE_TOKEN), candles([100] * 30 + [102]).to_dict("records")]
+    sdk.historical_data.side_effect = [RuntimeError(FAKE_TOKEN), scanner_candles([100] * 30 + [102]).to_dict("records")]
     response = client.get("/api/signals/ema", headers=HEADERS)
     data = response.json()
     assert response.status_code == 200 and data["stocks_scanned"] == 2 and data["signals_found"] == 1
@@ -309,7 +318,7 @@ def test_logout_during_scan_stops_further_requests(api_setup):
 
     def disconnect(*_args, **_kwargs):
         path.unlink()
-        return candles([100] * 30 + [102]).to_dict("records")
+        return scanner_candles([100] * 30 + [102]).to_dict("records")
 
     sdk.historical_data.side_effect = disconnect
     assert client.get("/api/signals/ema", headers=HEADERS).status_code == 401

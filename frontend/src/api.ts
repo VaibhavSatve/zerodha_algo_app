@@ -7,6 +7,9 @@ export type Signal = {
   rank: number; ticker: string; company: string; timeframe: Timeframe; crossover_type: 'Bullish' | 'Bearish'
   crossover_at: string; crossover_date: string; crossover_time: string
   close: number; short_ema: number; long_ema: number
+  macd: number; macd_signal: number
+  previous_candle_at: string; previous_short_ema: number; previous_long_ema: number
+  previous_macd: number; previous_macd_signal: number
 }
 export type ScanResult = {
   parameters: ScanParameters; generated_at: string; candle_cutoff: string; lookback_start: string
